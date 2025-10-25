@@ -46,3 +46,24 @@ def debug_img(images):
 
     plt.tight_layout()
     plt.show()
+
+
+def debug_img_individual(images):
+    """
+    Display each image individually with its title.
+
+    Parameters:
+        images (list of dict): List of dictionaries containing
+            {
+                "image": <numpy.ndarray>,
+                "title": <str>
+            }
+    """
+    for step in images:
+        plt.figure(figsize=(5, 5))
+        plt.imshow(
+            step["image"], cmap="gray" if len(step["image"].shape) == 2 else None
+        )
+        plt.title(step.get("title", ""))
+        plt.axis("off")
+        plt.show()

@@ -2,10 +2,9 @@ from pathlib import Path
 import sys
 from typing import List, Tuple
 import numpy as np
-import matplotlib.pyplot as plt
 import cv2
 
-from helpers import debug_img, draw_bboxes
+from helpers import debug_img, debug_img_individual, draw_bboxes
 from models.label import Label
 
 
@@ -31,7 +30,9 @@ def localize_char_bbox(
 
     # TODO: Essas funções deveriam ajudar a aumentar a precisão da detecção de bordas. Descobrir a maneira correta de aplicar elas
     # Binarização (threshold adaptativo ou Otsu)
-    _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    high_thresh, thresh = cv2.threshold(
+        blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
 
     # Inverter se necessário (caracteres escuros em fundo claro)
     if np.mean(thresh) > 127:
@@ -45,7 +46,7 @@ def localize_char_bbox(
     # TODO: Decobrir uma maeira melhor de selecionar o threshold utilizdo
     # Edge Detection
     if edge_method.lower() == "canny":
-        edges = cv2.Canny(blur, 100, 200)
+        edges = cv2.Canny(blur, high_thresh * 0.5, high_thresh)
 
     elif edge_method.lower() == "sobel":
         sobelx = cv2.Sobel(blur, cv2.CV_64F, 1, 0, ksize=3)
@@ -78,14 +79,9 @@ def localize_char_bbox(
     for contour in contours:
         # TODO: Melhorar heuristica
         x, y, w, h = cv2.boundingRect(contour)
-        aspect_ratio = w / h
-        area = w * h
 
         # Heurísticas para filtrar caracteres
-        if (
-            0.2 < aspect_ratio < 1.2
-            and 0.01 * h_img * w_img < area < 0.2 * h_img * w_img
-        ):
+        if heuristic(contour, img):
             cx = (x + w / 2) / w_img
             cy = (y + h / 2) / h_img
             predictions.append(
@@ -108,11 +104,24 @@ def localize_char_bbox(
     images_process = [
         {"image": gray, "title": "Grey"},
         {"image": blur, "title": "Blur"},
+        {"image": thresh, "title": "Thresh binarização"},
         {"image": edges, "title": "Edges" + f" {edge_method}"},
         {"image": img_contours_rgb, "title": "Detected Contours"},
     ]
 
     return (predictions, images_process)
+
+
+def heuristic(contour, img):
+    x, y, w, h = cv2.boundingRect(contour)
+    aspect_ratio = w / h
+    area = w * h
+    h_img, w_img = img.shape[:2]
+
+    if 0.2 < aspect_ratio < 1.2 and 0.01 * h_img * w_img < area < 0.2 * h_img * w_img:
+        return True
+    else:
+        return False
 
 
 def compute_iou(bbox1, bbox2):
@@ -223,7 +232,7 @@ def load_data(dir_path: str):
 def main():
     # Check command-line arguments
     if len(sys.argv) not in [2, 3]:
-        sys.exit("Usage: python traffic.py data_directory")
+        sys.exit("Usage: python main.py data_directory")
 
     # Get image arrays and labels for all image files
     images, labels = load_data(sys.argv[1])
@@ -245,7 +254,7 @@ def main():
             # Try Laplacian
             lap_preds, lap_images = localize_char_bbox(img, edge_method="laplacian")
             lap_metrics = evaluate_iou(lap_preds, label)
-            # print("Laplacian metrics:", lap_metrics)
+            # print("Lapl   acian metrics:", lap_metrics)
 
             # Try Sobel
             sobel_preds, sobel_images = localize_char_bbox(img, edge_method="sobel")
@@ -277,8 +286,13 @@ def main():
         image_process.append({"image": img, "title": "Original"})
         image_process.append({"image": imgdraw, "title": "Detected"})
 
-        # if metrics["precision"] < 0.1:
-        #     debug_img(image_process)
+        # Pegar imagens para relatório
+        if (
+            metrics["precision"] == 1
+            and metrics["mean_iou"] > 0.9
+            and metrics["recall"] > 0.9
+        ):
+            debug_img_individual(image_process)
 
         mean_iou += metrics["mean_iou"]
         mean_precision += metrics["precision"]

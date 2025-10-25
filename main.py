@@ -27,9 +27,16 @@ def localize_char_bbox(
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
     # Suavização para reduzir ruído
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
 
     # TODO: Essas funções deveriam ajudar a aumentar a precisão da detecção de bordas. Descobrir a maneira correta de aplicar elas
+    # Binarização (threshold adaptativo ou Otsu)
+    _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # Inverter se necessário (caracteres escuros em fundo claro)
+    if np.mean(thresh) > 127:
+        thresh = cv2.bitwise_not(thresh)
+
     # Remove little pieces
     # kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
     # clean = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kernel)
@@ -38,7 +45,7 @@ def localize_char_bbox(
     # TODO: Decobrir uma maeira melhor de selecionar o threshold utilizdo
     # Edge Detection
     if edge_method.lower() == "canny":
-        edges = cv2.Canny(blur, 50, 100)
+        edges = cv2.Canny(blur, 100, 200)
 
     elif edge_method.lower() == "sobel":
         sobelx = cv2.Sobel(blur, cv2.CV_64F, 1, 0, ksize=3)
@@ -55,11 +62,13 @@ def localize_char_bbox(
     else:
         raise ValueError("Método inválido. Use 'canny', 'sobel' ou 'laplacian'.")
 
+    combined = cv2.bitwise_or(thresh, edges)
+
     # TODO: Deve ser aplicado uma função para prevenção da junção das bordas
 
     # Contour Detection
     contours, hierarchy = cv2.findContours(
-        edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
     h_img, w_img = img.shape[:2]
 
@@ -67,12 +76,16 @@ def localize_char_bbox(
 
     predictions = []
     for contour in contours:
-        contour_area = cv2.contourArea(contour)
         # TODO: Melhorar heuristica
-        # Heurísticas para filtrar caracteres
-        if 100 < contour_area < 700:
-            x, y, w, h = cv2.boundingRect(contour)
+        x, y, w, h = cv2.boundingRect(contour)
+        aspect_ratio = w / h
+        area = w * h
 
+        # Heurísticas para filtrar caracteres
+        if (
+            0.2 < aspect_ratio < 1.2
+            and 0.01 * h_img * w_img < area < 0.2 * h_img * w_img
+        ):
             cx = (x + w / 2) / w_img
             cy = (y + h / 2) / h_img
             predictions.append(
@@ -225,19 +238,19 @@ def main():
         predictions, image_process = localize_char_bbox(img)
 
         metrics = evaluate_iou(predictions, label)
-        print(f"{index} Cannny metrics:", metrics)
+        # print(f"{index} Cannny metrics:", metrics)
 
         # If precision is too low, try fallback methods
         if metrics["precision"] < 0.1:
             # Try Laplacian
             lap_preds, lap_images = localize_char_bbox(img, edge_method="laplacian")
             lap_metrics = evaluate_iou(lap_preds, label)
-            print("Laplacian metrics:", lap_metrics)
+            # print("Laplacian metrics:", lap_metrics)
 
             # Try Sobel
             sobel_preds, sobel_images = localize_char_bbox(img, edge_method="sobel")
             sobel_metrics = evaluate_iou(sobel_preds, label)
-            print("Sobel metrics:", sobel_metrics)
+            # print("Sobel metrics:", sobel_metrics)
 
             # Pick best fallback by precision
             best_method = "laplacian"
@@ -256,7 +269,7 @@ def main():
                 predictions = best_preds
                 image_process = best_images
                 metrics = best_metrics
-                print(f"Using fallback method: {best_method}")
+                # print(f"Using fallback method: {best_method}")
 
         imgdraw = draw_bboxes(img, label, color=(0, 255, 0), thickness=1)
         imgdraw = draw_bboxes(imgdraw, predictions, color=(255, 0, 0), thickness=1)
@@ -264,8 +277,8 @@ def main():
         image_process.append({"image": img, "title": "Original"})
         image_process.append({"image": imgdraw, "title": "Detected"})
 
-        if metrics["precision"] < 0.1:
-            debug_img(image_process)
+        # if metrics["precision"] < 0.1:
+        #     debug_img(image_process)
 
         mean_iou += metrics["mean_iou"]
         mean_precision += metrics["precision"]

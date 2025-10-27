@@ -6,11 +6,11 @@ from models.label import Label
 
 
 def draw_bboxes(
-    img_rgb: cv2.Mat,
+    img_rgb: cv2.typing.MatLike,
     labels: list[Label],
     color: Tuple,
     thickness: int = 2,
-) -> cv2.Mat:
+) -> cv2.typing.MatLike:
     img_copy = img_rgb.copy()
     h, w, _ = img_copy.shape
 

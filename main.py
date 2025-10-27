@@ -4,49 +4,34 @@ from typing import List, Tuple
 import numpy as np
 import cv2
 
-from helpers import debug_img, debug_img_individual, draw_bboxes
+from helpers import draw_bboxes
 from models.label import Label
 
 
 def localize_char_bbox(
-    img: cv2.Mat, edge_method: str = "canny"
+    img: cv2.typing.MatLike, edge_method: str = "canny"
 ) -> Tuple[List[Label], List[dict]]:
     """
     Esta função localiza caracteres da placa usando métodos tradicionais e retorna
     bounding boxes normalizadas (YOLO-like).
-
-    Notas para o aluno:
-    1. Você provavelmente terá de testar diferentes métodos até encontrar um que
-    melhor atenda a tarefa.
-    2. Bounding boxes normalizadas (YOLO-like) significam que você terá que dividir
-    o pixel em X pela largura da imagem e o pixel em Y pela altura da imagem
     """
-    predictions: List[Label]
-
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
     # Suavização para reduzir ruído
     blur = cv2.GaussianBlur(gray, (3, 3), 0)
 
-    # TODO: Essas funções deveriam ajudar a aumentar a precisão da detecção de bordas. Descobrir a maneira correta de aplicar elas
     # Binarização (threshold adaptativo ou Otsu)
-    high_thresh, thresh = cv2.threshold(
+    otsu_thresh, thresh = cv2.threshold(
         blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
     )
 
-    # Inverter se necessário (caracteres escuros em fundo claro)
+    # Inverter cor dos pixels caso necessário (caracteres escuros em fundo claro)
     if np.mean(thresh) > 127:
         thresh = cv2.bitwise_not(thresh)
 
-    # Remove little pieces
-    # kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    # clean = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kernel)
-    # clean = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
-
-    # TODO: Decobrir uma maeira melhor de selecionar o threshold utilizdo
-    # Edge Detection
+    # Detecção de bordas
     if edge_method.lower() == "canny":
-        edges = cv2.Canny(blur, high_thresh * 0.5, high_thresh)
+        edges = cv2.Canny(blur, otsu_thresh * 0.5, otsu_thresh)
 
     elif edge_method.lower() == "sobel":
         sobelx = cv2.Sobel(blur, cv2.CV_64F, 1, 0, ksize=3)
@@ -63,44 +48,39 @@ def localize_char_bbox(
     else:
         raise ValueError("Método inválido. Use 'canny', 'sobel' ou 'laplacian'.")
 
+    # Combinação o método de Otsu junto com a técnica de detecção de bordas escolhido
     combined = cv2.bitwise_or(thresh, edges)
 
-    # TODO: Deve ser aplicado uma função para prevenção da junção das bordas
-
-    # Contour Detection
+    # Detecção de contorno
     contours, hierarchy = cv2.findContours(
         combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
-    h_img, w_img = img.shape[:2]
+    img_contours = img.copy()
+    cv2.drawContours(img_contours, contours, -1, (0, 255, 0), 1)
+    img_contours_rgb = cv2.cvtColor(img_contours, cv2.COLOR_BGR2RGB)
 
-    # TODO: Descobrir o porque as predições não estão corretas, mesmo pegado os contornos corretos de algumas imagens
-
+    # Filtração dos contornos através de uma heuristica.
+    # Temos que pegar somente os contornos dos caracteres e ignorar o restante
     predictions = []
+    h_img, w_img = img.shape[:2]
     for contour in contours:
-        # TODO: Melhorar heuristica
         x, y, w, h = cv2.boundingRect(contour)
 
-        # Heurísticas para filtrar caracteres
-        if heuristic(contour, img):
-            cx = (x + w / 2) / w_img
-            cy = (y + h / 2) / h_img
+        # Heurística para filtrar caracteres
+        if heuristic(img, contour):
+            center_x = (x + w / 2) / w_img
+            center_y = (y + h / 2) / h_img
             predictions.append(
                 Label(
                     class_id=0,
-                    center_x=cx,
-                    center_y=cy,
+                    center_x=center_x,
+                    center_y=center_y,
                     width=w / w_img,
                     height=h / h_img,
                 )
             )
 
-    # 6. Ordenar da esquerda para direita (opcional)
-    predictions.sort(key=lambda l: l.center_x)
-
-    # # Make a copy of the original image to draw contours on
-    img_contours = img.copy()
-    cv2.drawContours(img_contours, contours, -1, (0, 255, 0), 1)
-    img_contours_rgb = cv2.cvtColor(img_contours, cv2.COLOR_BGR2RGB)
+    # Junta imagens de cada parte do processo até detectar os caracteres da placa
     images_process = [
         {"image": gray, "title": "Grey"},
         {"image": blur, "title": "Blur"},
@@ -112,16 +92,38 @@ def localize_char_bbox(
     return (predictions, images_process)
 
 
-def heuristic(contour, img):
-    x, y, w, h = cv2.boundingRect(contour)
-    aspect_ratio = w / h
-    area = w * h
-    h_img, w_img = img.shape[:2]
+def heuristic(img: cv2.typing.MatLike, contour: cv2.typing.MatLike) -> bool:
+    """
+    Verifica se os contornos representam um caractere naquela imagem
 
-    if 0.2 < aspect_ratio < 1.2 and 0.01 * h_img * w_img < area < 0.2 * h_img * w_img:
-        return True
-    else:
-        return False
+    Args:
+        img (cv2.typing.MatLike): imagem
+        contour (cv2.typing.MatLike): contornos de um caracter da imagem
+
+    Returns:
+        bool: retorna se os contornar nessa imagem representam um caractere
+    """
+
+    # Assumimos inicialmente que não é um caractere
+    is_character = False
+
+    # Obtemos um retângulo delimitador baseado no contorno
+    x, y, w, h = cv2.boundingRect(contour)
+
+    # Métricas para validar se é o contorn de um caractere
+    character_aspect_ratio = w / h
+    character_area = w * h
+
+    h_img, w_img = img.shape[:2]
+    img_area = h_img * w_img
+
+    if (
+        0.2 < character_aspect_ratio < 0.8
+        and 0.02 * img_area < character_area < 0.15 * img_area
+    ):
+        is_character = True
+
+    return is_character
 
 
 def compute_iou(bbox1, bbox2):
@@ -181,41 +183,46 @@ def evaluate_iou(detected_labels, true_labels, iou_threshold=0.5):
     return {"mean_iou": float(mean_iou), "precision": precision, "recall": recall}
 
 
-def load_data(dir_path: str):
+def load_data(dir_path: str) -> Tuple[list[cv2.typing.MatLike], list[list[Label]]]:
     """
-    Load image data from directory `data_dir`.
+    Carregue os dados da imagem e labels de um diretorio
 
-    Return tuple `(images, labels)`. `images` should be a list of all
-    of the images in the data directory, where each image is formatted as a
-    open cv MatLike. `labels` should be a list of with a list of labels,
-    representing the list of labels for each of the corresponding `images`.
-    Each image has one label per character in the license plate.
+    Espera que as imagens e labels estejam ordenados numericamente,
+    e que as imagens estejam em arquivos .png e as labels em arquivos .txt.
+    Cada linha do arquivo .txt deve representar a label de um caractere da placa,
+    e ele devem estar separados por um espaço
+
+    Args:
+        dir_path (str): caminho para o diretorio com os dados
+
+    Returns:
+        Tuple[list[cv2.Mat], list[list[Label]]]: retorna imagens e labels encontrados no diretorio
     """
 
-    # Get path
+    # Pegue o caminho para o diretório
     dataset_dir_path = Path(dir_path)
+
+    # Separa as imagens dos labels
     images_file_path = list(dataset_dir_path.glob("*.png"))
     labels_file_path = list(dataset_dir_path.glob("*.txt"))
 
-    # Sort
+    # Ordena os arquivos para ficarem na mesma ordem
     images_file_path.sort()
     labels_file_path.sort()
 
-    # Pega uma porcentagem do dataset
-    # size = len(images_file_path)
-    # images_file_path = images_file_path[0 : int(size * 0.1)]
-    # labels_file_path = labels_file_path[0 : int(size * 0.1)]
-
-    # Get images
-    images: list[cv2.Mat] = []
+    # Carregue as imagens
+    images: list[cv2.typing.MatLike] = []
     for file_path in images_file_path:
         image = cv2.imread(str(file_path), cv2.IMREAD_COLOR_RGB)
-        images.append(image)
+        if image is not None:
+            images.append(image)
 
-    # Get labels
+    # Carregue as labels
     labels: list[list[Label]] = []
     for file_path in labels_file_path:
         file_labels = []
+
+        # Pegamos uma label por linha (caractere da placa)
         with open(file_path, "r") as f:
             lines = f.readlines()
             for line in lines:
@@ -230,76 +237,56 @@ def load_data(dir_path: str):
 
 
 def main():
-    # Check command-line arguments
+    # Verifique os argumentos passados para o programa
     if len(sys.argv) not in [2, 3]:
         sys.exit("Usage: python main.py data_directory")
 
-    # Get image arrays and labels for all image files
+    # Pegue as imagens e labels to dataset
     images, labels = load_data(sys.argv[1])
 
-    # Evaluate precision
+    # Metricas para medir desempenho do programa
     mean_iou = 0
     mean_precision = 0
     mean_recall = 0
 
-    for index, img, label in zip(range(len(images)), images, labels):
-        # Localize the caharacters of the licese plate in the image
-        predictions, image_process = localize_char_bbox(img)
+    for img, label in zip(images, labels):
+        # Localize os caracteres da placa
+        predictions, _ = localize_char_bbox(img)
 
+        # Verifique se as predições estão corretas
         metrics = evaluate_iou(predictions, label)
-        # print(f"{index} Cannny metrics:", metrics)
 
-        # If precision is too low, try fallback methods
-        if metrics["precision"] < 0.1:
-            # Try Laplacian
-            lap_preds, lap_images = localize_char_bbox(img, edge_method="laplacian")
-            lap_metrics = evaluate_iou(lap_preds, label)
-            # print("Lapl   acian metrics:", lap_metrics)
+        # Se as métricas forem muito ruins, tenta outros métodos
+        if all(metric < 0.2 for metric in metrics.values()):
+            # Tenta método laplaciano
+            lap_predictions, _ = localize_char_bbox(img, edge_method="laplacian")
+            lap_metrics = evaluate_iou(lap_predictions, label)
 
-            # Try Sobel
-            sobel_preds, sobel_images = localize_char_bbox(img, edge_method="sobel")
-            sobel_metrics = evaluate_iou(sobel_preds, label)
-            # print("Sobel metrics:", sobel_metrics)
+            # Tenta método de sobel
+            sobel_predicitions, _ = localize_char_bbox(img, edge_method="sobel")
+            sobel_metrics = evaluate_iou(sobel_predicitions, label)
 
-            # Pick best fallback by precision
-            best_method = "laplacian"
-            best_preds = lap_preds
-            best_images = lap_images
+            # Pegue o melhor metodo
+            best_preds = lap_predictions
             best_metrics = lap_metrics
 
             if sobel_metrics["precision"] > best_metrics["precision"]:
-                best_method = "sobel"
-                best_preds = sobel_preds
-                best_images = sobel_images
+                best_preds = sobel_predicitions
                 best_metrics = sobel_metrics
 
-            # Use best fallback if better than Canny
             if best_metrics["precision"] > metrics["precision"]:
                 predictions = best_preds
-                image_process = best_images
                 metrics = best_metrics
-                # print(f"Using fallback method: {best_method}")
 
         imgdraw = draw_bboxes(img, label, color=(0, 255, 0), thickness=1)
-        imgdraw = draw_bboxes(imgdraw, predictions, color=(255, 0, 0), thickness=1)
-
-        image_process.append({"image": img, "title": "Original"})
-        image_process.append({"image": imgdraw, "title": "Detected"})
-
-        # Pegar imagens para relatório
-        if (
-            metrics["precision"] == 1
-            and metrics["mean_iou"] > 0.9
-            and metrics["recall"] > 0.9
-        ):
-            debug_img_individual(image_process)
+        imgdraw = draw_bboxes(imgdraw, predictions, color=(0, 0, 255), thickness=1)
 
         mean_iou += metrics["mean_iou"]
         mean_precision += metrics["precision"]
         mean_recall += metrics["recall"]
 
     n_samples = len(images)
-    print()
+    print("Métricas finais:")
     print(f"Mean IoU: {mean_iou / n_samples}")
     print(f"Mean precision: {mean_precision / n_samples}")
     print(f"Mean recall: {mean_recall / n_samples}")

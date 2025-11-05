@@ -63,11 +63,14 @@ def localize_char_bbox(
     # Temos que pegar somente os contornos dos caracteres e ignorar o restante
     predictions = []
     h_img, w_img = img.shape[:2]
+    count_valid_contours = 0
     for contour in contours:
         x, y, w, h = cv2.boundingRect(contour)
 
         # Heurística para filtrar caracteres
         if heuristic(img, contour):
+            count_valid_contours += 1
+            
             center_x = (x + w / 2) / w_img
             center_y = (y + h / 2) / h_img
             predictions.append(
@@ -80,6 +83,7 @@ def localize_char_bbox(
                 )
             )
 
+
     # Junta imagens de cada parte do processo até detectar os caracteres da placa
     images_process = [
         {"image": gray, "title": "Grey"},
@@ -89,7 +93,7 @@ def localize_char_bbox(
         {"image": img_contours_rgb, "title": "Detected Contours"},
     ]
 
-    return (predictions, images_process)
+    return (predictions, images_process, count_valid_contours)
 
 
 def heuristic(img: cv2.typing.MatLike, contour: cv2.typing.MatLike) -> bool:
@@ -251,32 +255,50 @@ def main():
 
     for img, label in zip(images, labels):
         # Localize os caracteres da placa
-        predictions, _ = localize_char_bbox(img)
+        predictions, _, count_valid_contours = localize_char_bbox(img)
 
         # Verifique se as predições estão corretas
         metrics = evaluate_iou(predictions, label)
 
-        # Se as métricas forem muito ruins, tenta outros métodos
-        if all(metric < 0.2 for metric in metrics.values()):
-            # Tenta método laplaciano
-            lap_predictions, _ = localize_char_bbox(img, edge_method="laplacian")
+        # Se o algoritimo nãoe pegar o números de caracteres corretamente, tenta outro
+        if count_valid_contours != 7:
+            # Laplacian
+            lap_predictions, _, lap_count = localize_char_bbox(img, edge_method="laplacian")
             lap_metrics = evaluate_iou(lap_predictions, label)
 
-            # Tenta método de sobel
-            sobel_predicitions, _ = localize_char_bbox(img, edge_method="sobel")
-            sobel_metrics = evaluate_iou(sobel_predicitions, label)
+            # Sobel
+            sobel_predictions, _, sobel_count = localize_char_bbox(img, edge_method="sobel")
+            sobel_metrics = evaluate_iou(sobel_predictions, label)
 
-            # Pegue o melhor metodo
-            best_preds = lap_predictions
-            best_metrics = lap_metrics
+            # Guarda todos os resultados para comparar
+            results = [
+                {
+                    "method": "canny",
+                    "preds": predictions,
+                    "metrics": metrics,
+                    "count": count_valid_contours,
+                },
+                {
+                    "method": "laplacian",
+                    "preds": lap_predictions,
+                    "metrics": lap_metrics,
+                    "count": lap_count,
+                },
+                {
+                    "method": "sobel",
+                    "preds": sobel_predictions,
+                    "metrics": sobel_metrics,
+                    "count": sobel_count,
+                },
+            ]
 
-            if sobel_metrics["precision"] > best_metrics["precision"]:
-                best_preds = sobel_predicitions
-                best_metrics = sobel_metrics
+            # Critério 1: Priorizar o método com contagem mais próxima de 7
+            results.sort(key=lambda r: (abs(r["count"] - 7), -r["metrics"]["mean_iou"]))
 
-            if best_metrics["precision"] > metrics["precision"]:
-                predictions = best_preds
-                metrics = best_metrics
+            # Seleciona o melhor
+            best = results[0]
+            predictions = best["preds"]
+            metrics = best["metrics"]
 
         imgdraw = draw_bboxes(img, label, color=(0, 255, 0), thickness=1)
         imgdraw = draw_bboxes(imgdraw, predictions, color=(0, 0, 255), thickness=1)
